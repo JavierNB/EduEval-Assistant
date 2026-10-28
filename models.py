@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import gc
+import json
 import os
 from contextlib import contextmanager
 from itertools import chain
 from typing import Any, Iterable, Iterator
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 import numpy as np
 
@@ -15,7 +19,13 @@ def _is_out_of_memory(error: BaseException) -> bool:
     message = str(error).lower()
     return isinstance(error, MemoryError) or any(
         marker in message
-        for marker in ("out of memory", "cuda error: out of memory", "not enough memory")
+        for marker in (
+            "out of memory",
+            "cuda error: out of memory",
+            "not enough memory",
+            "failed to allocate",
+            "cannot allocate memory",
+        )
     )
 
 
@@ -23,7 +33,9 @@ class ModelLoader:
     """Loads one local model at a time and releases it even when inference fails."""
 
     def __init__(self) -> None:
-        self.llm_path = os.getenv("LLM_MODEL_PATH", "")
+        self.ollama_host = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+        self.ollama_model = os.getenv("OLLAMA_MODEL", "")
+        self.llm_context_size = int(os.getenv("LLM_CONTEXT_SIZE", "4096"))
         self.stt_model = os.getenv("STT_MODEL", "base")
         self.ocr_enabled = os.getenv("OCR_ENABLED", "true").lower() == "true"
 
@@ -210,34 +222,73 @@ class ModelLoader:
             self.release_memory()
 
     def invoke_llm(self, prompt: str) -> str:
-        if not self.llm_path or not os.path.isfile(self.llm_path):
+        if not self.ollama_model:
             raise RuntimeError(
-                "Configura LLM_MODEL_PATH con la ruta local a un modelo GGUF."
+                "Configura OLLAMA_MODEL con el nombre que muestra `ollama list`."
             )
-        from langchain_community.llms import LlamaCpp
+        parsed_host = urlparse(self.ollama_host)
+        if (
+            parsed_host.scheme != "http"
+            or parsed_host.hostname not in {"localhost", "127.0.0.1", "::1"}
+            or parsed_host.path not in {"", "/"}
+            or parsed_host.username
+            or parsed_host.password
+        ):
+            raise RuntimeError(
+                "OLLAMA_HOST debe apuntar al servicio local, por ejemplo "
+                "http://127.0.0.1:11434."
+            )
 
-        use_gpu = self._cuda_available()
-        configured_layers = int(os.getenv("LLM_GPU_LAYERS", "20")) if use_gpu else 0
+        def run(context_size: int) -> str:
+            request_body = json.dumps(
+                {
+                    "model": self.ollama_model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "format": "json",
+                    "keep_alive": 0,
+                    "options": {
+                        "num_ctx": context_size,
+                        "num_predict": 800,
+                        "temperature": 0.1,
+                    },
+                }
+            ).encode("utf-8")
+            request = Request(
+                f"{self.ollama_host}/api/generate",
+                data=request_body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urlopen(request, timeout=600) as response:
+                    result = json.loads(response.read().decode("utf-8"))
+            except HTTPError as error:
+                detail = error.read().decode("utf-8", errors="replace").strip()
+                raise RuntimeError(
+                    f"Ollama respondió HTTP {error.code}: {detail or error.reason}"
+                ) from error
+            except URLError as error:
+                raise RuntimeError(
+                    "No se pudo conectar con Ollama en "
+                    f"{self.ollama_host}. Verifica que Ollama esté iniciado."
+                ) from error
+            except json.JSONDecodeError as error:
+                raise RuntimeError("Ollama devolvió una respuesta JSON inválida.") from error
 
-        def run(gpu_layers: int) -> str:
-            with self._managed(
-                lambda: LlamaCpp(
-                    model_path=self.llm_path,
-                    n_ctx=int(os.getenv("LLM_CONTEXT_SIZE", "6144")),
-                    n_batch=128,
-                    n_threads=max(1, (os.cpu_count() or 2) - 1),
-                    n_gpu_layers=gpu_layers,
-                    temperature=0.1,
-                    max_tokens=800,
-                    verbose=False,
-                )
-            ) as model:
-                return str(model.invoke(prompt))
+            if isinstance(result, dict) and result.get("error"):
+                raise RuntimeError(f"Ollama: {result['error']}")
+            if not isinstance(result, dict) or not isinstance(
+                result.get("response"), str
+            ):
+                raise RuntimeError("Ollama no devolvió el campo de texto `response`.")
+            return result["response"]
 
         try:
-            return run(configured_layers)
+            return run(self.llm_context_size)
         except Exception as error:
-            if not use_gpu or configured_layers == 0 or not _is_out_of_memory(error):
+            fallback_context = max(2048, self.llm_context_size // 2)
+            if not _is_out_of_memory(error) or fallback_context >= self.llm_context_size:
                 raise
             self.release_memory()
-            return run(0)
+            return run(fallback_context)

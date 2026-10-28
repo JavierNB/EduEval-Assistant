@@ -7,9 +7,9 @@ import json
 import math
 import re
 import uuid
+import wave
 from typing import Any, Iterator, TypedDict
 
-import av
 import numpy as np
 import pymupdf
 from langgraph.graph import END, START, StateGraph
@@ -56,21 +56,57 @@ class EvaluationState(TypedDict, total=False):
 
 
 def _decode_audio(audio: bytes | bytearray) -> np.ndarray:
-    """Decode uploaded audio directly from memory to a 16 kHz mono float array."""
-    with av.open(io.BytesIO(audio)) as container:
-        stream = next((item for item in container.streams if item.type == "audio"), None)
-        if stream is None:
-            raise ValueError("El archivo de audio no contiene una pista de audio.")
-        resampler = av.AudioResampler(format="s16", layout="mono", rate=16_000)
-        chunks: list[np.ndarray] = []
-        for frame in container.decode(stream):
-            for converted in resampler.resample(frame):
-                chunks.append(converted.to_ndarray().reshape(-1))
-        for converted in resampler.resample(None):
-            chunks.append(converted.to_ndarray().reshape(-1))
-        if not chunks:
-            raise ValueError("No se pudo decodificar audio del archivo recibido.")
-        return np.concatenate(chunks).astype(np.float32) / 32768.0
+    """Decode Streamlit's PCM WAV recording to a 16 kHz mono float array in RAM."""
+    try:
+        with wave.open(io.BytesIO(audio), "rb") as wav:
+            if wav.getcomptype() != "NONE":
+                raise ValueError("El audio debe estar en formato WAV PCM sin comprimir.")
+            channels = wav.getnchannels()
+            sample_rate = wav.getframerate()
+            sample_width = wav.getsampwidth()
+            frame_count = wav.getnframes()
+            raw_audio = wav.readframes(frame_count)
+    except (wave.Error, EOFError) as error:
+        raise ValueError(
+            "No se pudo leer la grabación. Se esperaba audio WAV PCM de Streamlit."
+        ) from error
+
+    if channels < 1 or sample_rate < 1 or frame_count < 1:
+        raise ValueError("La grabación no contiene muestras de audio válidas.")
+
+    if sample_width == 1:
+        samples = np.frombuffer(raw_audio, dtype=np.uint8).astype(np.float32)
+        samples = (samples - 128.0) / 128.0
+    elif sample_width == 2:
+        samples = np.frombuffer(raw_audio, dtype="<i2").astype(np.float32) / 32768.0
+    elif sample_width == 3:
+        bytes_24 = np.frombuffer(raw_audio, dtype=np.uint8).reshape(-1, 3)
+        integers = (
+            bytes_24[:, 0].astype(np.int32)
+            | (bytes_24[:, 1].astype(np.int32) << 8)
+            | (bytes_24[:, 2].astype(np.int32) << 16)
+        )
+        integers = (integers ^ 0x800000) - 0x800000
+        samples = integers.astype(np.float32) / 8_388_608.0
+    elif sample_width == 4:
+        samples = np.frombuffer(raw_audio, dtype="<i4").astype(np.float32)
+        samples /= 2_147_483_648.0
+    else:
+        raise ValueError(f"Profundidad de audio WAV no compatible: {sample_width * 8} bits.")
+
+    samples = samples.reshape(-1, channels).mean(axis=1)
+    if sample_rate != 16_000:
+        output_count = round(len(samples) * 16_000 / sample_rate)
+        if output_count < 1:
+            raise ValueError("La grabación es demasiado corta para transcribir.")
+        source_positions = np.arange(len(samples), dtype=np.float64)
+        target_positions = np.arange(output_count, dtype=np.float64) * (
+            sample_rate / 16_000
+        )
+        target_positions = np.minimum(target_positions, len(samples) - 1)
+        samples = np.interp(target_positions, source_positions, samples)
+
+    return np.asarray(samples, dtype=np.float32)
 
 
 def _anonymize(text: str, student_name: str) -> str:
