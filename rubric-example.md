@@ -1,0 +1,12 @@
+# Rúbrica de ejemplo: informe de investigación
+
+| Criterio | Excelente (4) | Satisfactorio (3) | En desarrollo (2) | Inicial (1) | Peso |
+|---|---|---|---|---|---:|
+| Argumentación | Tesis clara y argumentos coherentes, sustentados con evidencia pertinente. | Tesis clara y argumentos generalmente sustentados. | Tesis poco precisa o evidencia limitada. | No presenta una tesis o no aporta evidencia. | 40% |
+| Uso de fuentes | Integra y cita correctamente fuentes confiables y diversas. | Usa fuentes pertinentes con errores menores de citación. | Usa pocas fuentes o presenta errores frecuentes. | No cita fuentes o estas no son pertinentes. | 30% |
+| Organización y claridad | Estructura lógica y redacción clara, prácticamente sin errores. | Estructura comprensible con algunos errores menores. | Organización irregular y errores que dificultan la lectura. | Texto desorganizado o difícil de comprender. | 20% |
+| Reflexión | Explica implicaciones y reconoce limitaciones de su análisis. | Incluye una reflexión pertinente. | Reflexión superficial o poco conectada. | No incluye reflexión. | 10% |
+
+**Cálculo sugerido:** convertir el nivel (1–4) a porcentaje del criterio y aplicar
+el peso; total máximo 100 puntos. El docente debe confirmar la interpretación y
+la calificación antes de compartir el feedback.
